@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>claude-preview</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+</head>
+<body>
+  <div id="titlebar">
+    <div class="tb-left">
+      <span class="logo">◆</span>
+      <span class="brand">claude-preview</span>
+      <button id="open-folder" class="btn">Open folder…</button>
+      <span id="workspace" class="workspace"></span>
+    </div>
+    <div class="tb-right">
+      <span id="status" class="status">connecting…</span>
+    </div>
+  </div>
+
+  <div id="workbench">
+    <!-- Explorer -->
+    <aside id="explorer">
+      <div class="panel-head">
+        <span>Explorer</span>
+        <button id="reload-tree" class="icon-btn" title="Reload">⟳</button>
+      </div>
+      <div id="tree" class="tree"></div>
+    </aside>
+    <div class="splitter" data-target="explorer"></div>
+
+    <!-- Editor + terminal -->
+    <main id="center">
+      <div id="tabs" class="tabs"></div>
+      <div id="editor-area">
+        <div id="editor"></div>
+        <div id="diff-overlay" class="hidden">
+          <div class="diff-bar">
+            <span id="diff-title"></span>
+            <div class="diff-actions">
+              <button id="diff-reject" class="btn danger">Reject</button>
+              <button id="diff-accept" class="btn primary">Accept</button>
+              <button id="diff-close" class="btn">Close</button>
+            </div>
+          </div>
+          <div id="diff-editor"></div>
+        </div>
+      </div>
+      <div class="splitter horizontal" data-target="terminal"></div>
+      <section id="terminal">
+        <div class="panel-head">
+          <span>Terminal</span>
+          <button id="term-clear" class="icon-btn" title="Clear">⌫</button>
+        </div>
+        <div id="term-output" class="term-output"></div>
+        <div class="term-input-row">
+          <span class="prompt">$</span>
+          <input id="term-input" class="term-input" placeholder="run a command…" autocomplete="off" />
+        </div>
+      </section>
+    </main>
+    <div class="splitter" data-target="chat"></div>
+
+    <!-- Chat / Composer -->
+    <aside id="chat">
+      <div class="panel-head">
+        <span>Chat</span>
+        <button id="stop-btn" class="icon-btn hidden" title="Stop">■</button>
+      </div>
+      <div id="review" class="review hidden">
+        <div class="review-head">
+          <span id="review-count">0 changes</span>
+          <div>
+            <button id="reject-all" class="btn danger sm">Reject all</button>
+            <button id="accept-all" class="btn primary sm">Accept all</button>
+          </div>
+        </div>
+        <div id="review-list"></div>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="composer-input" placeholder="Ask Claude to build or change something…  (Enter to send, Shift+Enter for newline)" rows="3"></textarea>
+        <button id="send-btn" class="btn primary">Send</button>
+      </div>
+    </aside>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/14.1.3/marked.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

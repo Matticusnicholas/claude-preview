@@ -29,12 +29,22 @@ Built with [Textual](https://textual.textualize.io/) (reactive TUI), [Rich](http
 
 ---
 
+## Two ways to run it
+
+| | What it is |
+|---|---|
+| 🖥️ **Web IDE** (`start-web.bat`) | A **Cursor-style editor in your browser** — file tree, Monaco code editor with tabs, AI chat composer, inline diffs with **accept/reject**, and an integrated terminal. This is the main experience (and the base for the upcoming Electron app). |
+| ⌨️ **Terminal app** (`start.bat`) | The same agent in a split-screen **TUI** — chat + live preview, no browser. Great over SSH. |
+
+Both run the same engine: the Claude Agent SDK on your local Claude Code login.
+
 ## Quick start (one click)
 
 Clone the repo, then:
 
-- **Windows:** double-click **`start.bat`**
-- **macOS / Linux:** `./start.sh`
+- **Web IDE — Windows:** double-click **`start-web.bat`** (opens `http://127.0.0.1:8765`)
+- **Terminal app — Windows:** double-click **`start.bat`**
+- **macOS / Linux (terminal app):** `./start.sh`  ·  **(web)** `python webapp/server.py`
 
 The launcher installs everything it needs (Python deps, and Claude Code if you
 have Node.js), then asks for your **Claude auth token once** and saves it
@@ -45,6 +55,18 @@ in with your Claude subscription), or you can paste one you already have.
 The token is stored at `%LOCALAPPDATA%\claude-preview\auth.token` (Windows) or
 `~/.config/claude-preview/auth.token` (macOS/Linux) — outside the repo, so it is
 never committed or shared.
+
+### The Web IDE
+
+Once it's open in your browser:
+
+- **Open folder** (top bar) → pick the project you want to work in (native dialog).
+- **Explorer** (left) → click any file to open it in the Monaco editor; edit and `Ctrl+S` to save.
+- **Chat** (right) → ask Claude to build or change things. It edits the real files; you see live activity.
+- **Review changes** (top of chat) → every edit appears with a **badge** (new/modified). Click a file to see the **side-by-side diff**, then **Accept** (keep) or **Reject** (revert). Accept-all / Reject-all too.
+- **Terminal** (bottom) → run commands in the workspace; the agent's commands stream here as well.
+
+Eventually this ships as a one-click **Electron** desktop app; the architecture (local FastAPI backend + browser UI) is already set up for it.
 
 ## Manual install
 
