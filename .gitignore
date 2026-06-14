@@ -6,3 +6,8 @@ dist/
 .venv/
 venv/
 .env
+
+# never commit a saved auth token
+*.token
+auth.token
+.auth/

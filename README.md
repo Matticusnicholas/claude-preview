@@ -29,22 +29,48 @@ Built with [Textual](https://textual.textualize.io/) (reactive TUI), [Rich](http
 
 ---
 
-## Install
+## Quick start (one click)
 
-Python 3.10+ and **Claude Code** (which provides the engine + login):
+Clone the repo, then:
+
+- **Windows:** double-click **`start.bat`**
+- **macOS / Linux:** `./start.sh`
+
+The launcher installs everything it needs (Python deps, and Claude Code if you
+have Node.js), then asks for your **Claude auth token once** and saves it
+locally — every run after that goes straight into the app. To get a token it can
+generate one for you (`claude setup-token`, which opens a browser and signs you
+in with your Claude subscription), or you can paste one you already have.
+
+The token is stored at `%LOCALAPPDATA%\claude-preview\auth.token` (Windows) or
+`~/.config/claude-preview/auth.token` (macOS/Linux) — outside the repo, so it is
+never committed or shared.
+
+## Manual install
+
+Prefer to do it by hand? Python 3.10+ and **Claude Code**:
 
 ```sh
-# 1. Claude Code — the agent runtime and your login
+# 1. Claude Code — the agent runtime + your login
 npm install -g @anthropic-ai/claude-code
-claude            # then run /login once to sign in with your Claude subscription
+claude setup-token        # one-time; prints a token tied to your subscription
 
 # 2. This app
-pip install -r requirements.txt
-# or, for the `claude-preview` command on your PATH:
-pip install -e .
+pip install -r requirements.txt        # or: pip install -e .
 ```
 
-That's the whole setup — your Claude Code login is reused automatically, so there's no API key to manage.
+Set the token for your shell (or just use `start.bat`/`start.sh`, which do this
+for you):
+
+```sh
+# PowerShell
+$env:CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat..."
+# bash/zsh
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat..."
+```
+
+(If you're already logged in via `claude /login`, the app reuses that session and
+no token is needed at all.)
 
 ## Run
 
