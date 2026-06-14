@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""claude-preview — an interactive Claude coding session with a live preview pane.
+"""claude-preview — a Cursor-style coding agent in your terminal.
 
-Left pane:  chat with Claude (history, input, slash commands).
-Right pane: live tabs for every code block Claude generates, a file tree,
-            markdown preview, and script output.
+Pick a folder, then chat with Claude. The agent reads, writes, edits, and runs
+code directly in that folder — and the right-hand preview pane shows a live
+file explorer, the diffs of every change, and command output.
 
-Run:  python -m claude_preview   (or: python claude_preview.py, or: claude-preview)
-Requires: ANTHROPIC_API_KEY in the environment.
+Engine:  the Claude Agent SDK, which runs on your local Claude Code login
+         (Pro/Max subscription — no API key needed). Each user runs it on
+         their own machine with their own Claude Code session.
+
+Run:  python claude_preview.py   (or: python -m claude_preview, or: claude-preview)
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
-import re
-import shutil
-import subprocess
-import sys
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Protocol
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax
@@ -30,6 +26,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
+    Button,
+    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -37,142 +35,80 @@ from textual.widgets import (
     Static,
     TabbedContent,
     TabPane,
-    Tree,
+)
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
 
-DEFAULT_MODEL = os.environ.get("CLAUDE_PREVIEW_MODEL", "claude-opus-4-8")
-MAX_TOKENS = int(os.environ.get("CLAUDE_PREVIEW_MAX_TOKENS", "32000"))
+MODEL = os.environ.get("CLAUDE_PREVIEW_MODEL")  # None -> Claude Code's default
+PERMISSION_MODE = os.environ.get("CLAUDE_PREVIEW_PERMISSION", "acceptEdits")
+ALLOWED_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]
+EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 SYSTEM_PROMPT = """\
-You are a coding assistant inside `claude-preview`, a terminal app with a live
-preview pane that renders every code block you produce.
-
-When you write a file, ALWAYS open the fenced block with the language AND a
-filename, e.g.:
-
-```python app.py
-print("hello")
-```
-
-Use one fenced block per file and keep filenames stable across revisions so
-the preview pane updates the same tab. Prefer complete files over fragments
-when the user asks you to build or modify something.
+You are the coding agent inside `claude-preview`, a terminal IDE. You work
+directly in the user's chosen project folder: read, write, edit, and run code
+as needed to fulfil requests. Be concise in chat — the user can see your file
+changes and command output in a side panel, so don't paste whole files back.
+After making changes, give a short summary of what you did.
 """
 
-EXT_FOR_LANG = {
-    "python": "py", "py": "py", "javascript": "js", "js": "js",
-    "typescript": "ts", "ts": "ts", "tsx": "tsx", "jsx": "jsx",
-    "html": "html", "css": "css", "json": "json", "yaml": "yaml",
-    "yml": "yml", "toml": "toml", "bash": "sh", "sh": "sh", "shell": "sh",
-    "sql": "sql", "rust": "rs", "go": "go", "java": "java", "c": "c",
-    "cpp": "cpp", "markdown": "md", "md": "md", "text": "txt",
-}
-
-CODE_BLOCK_RE = re.compile(
-    r"```([A-Za-z0-9_+-]*)[ \t]*([^\s`]*)[ \t]*\n(.*?)(?:```|\Z)",
-    re.DOTALL,
-)
-
-HELP_TEXT = """\
-[bold]Commands[/bold]
-  /apply <file>     write a generated file to disk
-  /apply all        write every generated file to disk
-  /run <file>       run a generated/applied Python or shell file, output → Output tab
-  /preview <file>   focus a file's tab in the preview pane
-  /load <path>      read a file from disk into the conversation
-  /files            list generated files
-  /clear            clear conversation history (keeps generated files)
-  /model [name]     show or switch the model
-  /help             show this help
-
-[bold]Keys[/bold]
-  Ctrl+R  refresh preview    Tab  cycle focus    Ctrl+L  clear chat log    Ctrl+Q  quit
-"""
+MARKDOWN_EXTS = {".md", ".markdown"}
 
 
-# --------------------------------------------------------------------------- #
-# Pluggable LLM provider layer
-# --------------------------------------------------------------------------- #
-
-class LLMProvider(Protocol):
-    """Anything that can stream a chat completion. Swap in your own backend."""
-
-    model: str
-
-    def stream_chat(
-        self, system: str, messages: list[dict]
-    ) -> AsyncIterator[str]: ...
-
-
-class AnthropicProvider:
-    """Default provider — official Anthropic SDK, streaming, adaptive thinking."""
-
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
-        import anthropic
-
-        self.model = model
-        self._client = anthropic.AsyncAnthropic()
-
-    async def stream_chat(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
-        async with self._client.messages.stream(
-            model=self.model,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            thinking={"type": "adaptive"},
-            messages=messages,
-        ) as stream:
-            async for text in stream.text_stream:
-                yield text
+def renderable_for_path(path: Path):
+    """Syntax-highlighted (or markdown) view of a file on disk."""
+    try:
+        if path.suffix.lower() in MARKDOWN_EXTS:
+            return RichMarkdown(path.read_text(encoding="utf-8", errors="replace"))
+        return Syntax.from_path(
+            str(path),
+            line_numbers=True,
+            word_wrap=True,
+            indent_guides=True,
+            theme="ansi_dark",
+        )
+    except Exception as exc:  # binary, too large, permissions, gone
+        return Text(f"(cannot preview {path.name}: {exc})", style="red")
 
 
-# --------------------------------------------------------------------------- #
-# Generated-file model
-# --------------------------------------------------------------------------- #
+def tab_id(path: Path) -> str:
+    import re
 
-@dataclass
-class GeneratedFile:
-    name: str
-    language: str
-    content: str
-    applied: bool = False
+    return "file-" + re.sub(r"[^A-Za-z0-9_-]", "-", str(path))
 
 
-@dataclass
-class Workspace:
-    """All code blocks extracted from the conversation, keyed by filename."""
+def diff_text(file_path: str, old: str, new: str) -> Text:
+    """Render an Edit as a small red/green diff."""
+    import difflib
 
-    files: dict[str, GeneratedFile] = field(default_factory=dict)
-    _anon_count: int = 0
-
-    def update_from_text(self, text: str) -> list[str]:
-        """Re-extract code blocks from an assistant message. Returns touched names."""
-        touched: list[str] = []
-        anon_index = 0
-        for match in CODE_BLOCK_RE.finditer(text):
-            lang = (match.group(1) or "text").lower()
-            name = match.group(2) or ""
-            content = match.group(3)
-            if not name:
-                anon_index += 1
-                ext = EXT_FOR_LANG.get(lang, "txt")
-                name = f"snippet_{anon_index}.{ext}"
-            existing = self.files.get(name)
-            if existing is not None:
-                existing.content = content
-                existing.language = lang
-            else:
-                self.files[name] = GeneratedFile(name=name, language=lang, content=content)
-            touched.append(name)
-        return touched
-
-
-def slug(name: str) -> str:
-    """Textual widget IDs allow letters, digits, underscore, hyphen."""
-    return "tab-" + re.sub(r"[^A-Za-z0-9_-]", "-", name)
+    t = Text()
+    t.append(f"\n✱ {file_path}\n", style="bold yellow")
+    for line in difflib.unified_diff(
+        old.splitlines(), new.splitlines(), lineterm="", n=1
+    ):
+        if line.startswith("+") and not line.startswith("+++"):
+            t.append(line + "\n", style="green")
+        elif line.startswith("-") and not line.startswith("---"):
+            t.append(line + "\n", style="red")
+        elif line.startswith("@@"):
+            t.append(line + "\n", style="cyan")
+    return t
 
 
 # --------------------------------------------------------------------------- #
@@ -180,10 +116,8 @@ def slug(name: str) -> str:
 # --------------------------------------------------------------------------- #
 
 class ChatLog(RichLog):
-    """Conversation history with rich rendering."""
-
     def add_user(self, text: str) -> None:
-        self.write(Text(f"\nYou", style="bold cyan"))
+        self.write(Text("\nYou", style="bold cyan"))
         self.write(Text(text))
 
     def add_system(self, text: str) -> None:
@@ -192,8 +126,13 @@ class ChatLog(RichLog):
     def add_error(self, text: str) -> None:
         self.write(Text(f"\n✗ {text}", style="bold red"))
 
-    def add_assistant_markdown(self, text: str) -> None:
+    def add_activity(self, text: str, style: str = "dim") -> None:
+        self.write(Text(text, style=style))
+
+    def add_assistant_header(self) -> None:
         self.write(Text("\nClaude", style="bold magenta"))
+
+    def add_assistant_markdown(self, text: str) -> None:
         self.write(RichMarkdown(text))
 
 
@@ -205,452 +144,387 @@ class StatusBar(Static):
 
 
 # --------------------------------------------------------------------------- #
-# The app
+# App
 # --------------------------------------------------------------------------- #
 
 class ClaudePreviewApp(App):
-    """Split-screen Claude chat with live code preview."""
+    """Cursor-style Claude coding agent with a live workspace preview."""
 
     TITLE = "claude-preview"
-    SUB_TITLE = DEFAULT_MODEL
 
     CSS = """
-    #main {
-        height: 1fr;
+    #workspace-bar {
+        dock: top;
+        height: 1;
+        padding: 0 1;
+        background: $boost;
     }
+    #main { height: 1fr; }
     #left {
-        width: 65%;
+        width: 62%;
         border: round $primary;
         border-title-align: left;
     }
     #right {
-        width: 35%;
+        width: 38%;
         border: round $secondary;
         border-title-align: left;
     }
-    #chat-log {
-        height: 1fr;
-        padding: 0 1;
-    }
-    #chat-input {
-        dock: bottom;
-        margin: 0 1 1 1;
-    }
-    #status {
-        dock: bottom;
-        height: 1;
-        padding: 0 2;
-        background: $surface;
-    }
-    #file-tree {
-        height: 1fr;
-    }
-    .preview-code {
-        padding: 0 1;
-    }
-    TabbedContent {
-        height: 1fr;
-    }
+    #chat-log { height: 1fr; padding: 0 1; }
+    #chat-input { dock: bottom; margin: 0 1 1 1; }
+    #status { dock: bottom; height: 1; padding: 0 2; background: $surface; }
+    #open-folder { dock: top; width: 100%; margin: 0 1; }
+    DirectoryTree { height: 1fr; }
+    TabbedContent { height: 1fr; }
+    .preview-body { padding: 0 1; }
     """
 
     BINDINGS = [
-        Binding("ctrl+r", "refresh_preview", "Refresh preview"),
+        Binding("ctrl+o", "open_folder", "Open folder"),
+        Binding("ctrl+r", "reload_tree", "Reload tree"),
+        Binding("ctrl+g", "stop_agent", "Stop agent"),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str | None = None) -> None:
         super().__init__()
-        self.workspace = Workspace()
-        self.history: list[dict] = []
-        self.provider: LLMProvider | None = None
-        self.provider_error: str | None = None
-        try:
-            self.provider = AnthropicProvider()
-        except Exception as exc:  # missing key / missing package
-            self.provider_error = str(exc)
+        self.workspace = Path(workspace or os.getcwd()).resolve()
+        self.client: ClaudeSDKClient | None = None
+        self.connected = False
+        self.connect_error: str | None = None
+        self.open_tabs: dict[str, Path] = {}
+        self._bash_calls: dict[str, str] = {}
 
     # ----------------------------------------------------------------- UI -- #
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        yield Static(id="workspace-bar")
         with Horizontal(id="main"):
             with Vertical(id="left") as left:
                 left.border_title = "Chat"
                 yield ChatLog(id="chat-log", wrap=True, markup=False)
                 yield Input(
-                    placeholder="Message Claude…  (/help for commands)",
+                    placeholder="Ask Claude to build or change something…  (Ctrl+O to pick a folder)",
                     id="chat-input",
                 )
             with Vertical(id="right") as right:
-                right.border_title = "Preview"
+                right.border_title = "Workspace"
                 with TabbedContent(id="preview-tabs"):
-                    with TabPane("Files", id="tab-files"):
-                        yield Tree("workspace", id="file-tree")
+                    with TabPane("Explorer", id="tab-explorer"):
+                        yield Button("📂  Open folder…", id="open-folder", variant="primary")
+                        yield DirectoryTree(str(self.workspace), id="file-tree")
+                    with TabPane("Changes", id="tab-changes"):
+                        yield RichLog(id="changes-log", wrap=True, markup=False)
                     with TabPane("Output", id="tab-output"):
-                        yield RichLog(id="output-log", wrap=True)
+                        yield RichLog(id="output-log", wrap=True, markup=False)
         yield StatusBar(id="status")
         yield Footer()
 
     def on_mount(self) -> None:
         log = self.query_one(ChatLog)
-        log.add_system("Welcome to claude-preview — Copilot-style chat with a live preview pane.")
-        log.add_system("Code blocks Claude writes appear as tabs on the right. Type /help for commands.")
-        if self.provider is None:
-            log.add_error(
-                "Not logged in. Quit (Ctrl+Q) and relaunch to open the Claude browser login,\n"
-                "or run `ant auth login` / set ANTHROPIC_API_KEY, then restart.\n"
-                f"  detail: {self.provider_error}"
-            )
-            self.status("Not logged in — chat disabled")
-        else:
-            self.status(f"Ready — {self.provider.model}")
+        log.add_system("claude-preview — a Claude coding agent that works in a folder you choose.")
+        log.add_system("Engine: Claude Agent SDK on your local Claude Code login (no API key).")
+        log.add_system("Press Ctrl+O (or the Open folder button) to pick a project, then just chat.")
+        self.update_workspace_bar()
         self.query_one("#chat-input", Input).focus()
-        self.refresh_file_tree()
+        self.connect_agent()
+
+    def update_workspace_bar(self) -> None:
+        self.query_one("#workspace-bar", Static).update(
+            Text.assemble(("📂 ", "yellow"), (str(self.workspace), "bold"))
+        )
 
     def status(self, text: str, busy: bool = False) -> None:
         self.query_one(StatusBar).set_status(text, busy)
 
+    # ------------------------------------------------------- agent connect -- #
+
+    def _build_options(self) -> ClaudeAgentOptions:
+        async def allow_all(*_args, **_kwargs):  # never stall on a permission prompt
+            return PermissionResultAllow()
+
+        kwargs = dict(
+            allowed_tools=ALLOWED_TOOLS,
+            permission_mode=PERMISSION_MODE,
+            cwd=str(self.workspace),
+            system_prompt=SYSTEM_PROMPT,
+            can_use_tool=allow_all,
+        )
+        if MODEL:
+            kwargs["model"] = MODEL
+        return ClaudeAgentOptions(**kwargs)
+
+    @work(exclusive=True, group="connect")
+    async def connect_agent(self) -> None:
+        log = self.query_one(ChatLog)
+        self.status("Connecting to Claude Code…", busy=True)
+        # Tear down a previous session (e.g. on folder switch).
+        if self.client is not None:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            self.client = None
+            self.connected = False
+        try:
+            self.client = ClaudeSDKClient(options=self._build_options())
+            await self.client.connect()
+            self.connected = True
+            self.connect_error = None
+            self.status(f"Ready — working in {self.workspace.name}")
+        except Exception as exc:
+            self.connected = False
+            self.connect_error = str(exc)
+            log.add_error(
+                "Couldn't start the Claude agent. Make sure Claude Code is installed and "
+                "logged in:\n"
+                "  npm install -g @anthropic-ai/claude-code   (then run:  claude  and /login)\n"
+                f"  detail: {exc}"
+            )
+            self.status("Not connected — log into Claude Code")
+
     # ------------------------------------------------------------- actions -- #
 
-    def action_refresh_preview(self) -> None:
-        self.refresh_all_previews()
-        self.status("Preview refreshed")
+    def action_reload_tree(self) -> None:
+        self.query_one(DirectoryTree).reload()
+        self.refresh_open_tabs()
+        self.status("Workspace reloaded")
 
     def action_clear_log(self) -> None:
         self.query_one(ChatLog).clear()
-        self.status("Chat log cleared")
 
-    # --------------------------------------------------------------- input -- #
+    def action_stop_agent(self) -> None:
+        if self.client and self.connected:
+            self.interrupt_agent()
+
+    @work(group="interrupt")
+    async def interrupt_agent(self) -> None:
+        try:
+            await self.client.interrupt()  # type: ignore[union-attr]
+            self.query_one(ChatLog).add_system("⏹ Interrupted.")
+            self.status(f"Ready — working in {self.workspace.name}")
+        except Exception as exc:
+            self.query_one(ChatLog).add_error(f"Couldn't interrupt: {exc}")
+
+    def action_open_folder(self) -> None:
+        self.pick_folder()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "open-folder":
+            self.pick_folder()
+
+    # ------------------------------------------------------- folder picker -- #
+
+    @work(thread=True, group="picker")
+    def pick_folder(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one(ChatLog).add_error,
+                f"Folder dialog unavailable ({exc}). Set the folder by launching: "
+                f"claude-preview <path>",
+            )
+            return
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(
+            title="Select a folder for claude-preview to work in",
+            initialdir=str(self.workspace),
+        )
+        root.destroy()
+        if chosen:
+            self.call_from_thread(self.set_workspace, chosen)
+
+    def set_workspace(self, path: str) -> None:
+        self.workspace = Path(path).resolve()
+        self.update_workspace_bar()
+        tree = self.query_one(DirectoryTree)
+        tree.path = str(self.workspace)
+        tree.reload()
+        # Close stale file tabs.
+        tabs = self.query_one("#preview-tabs", TabbedContent)
+        for pane_id in list(self.open_tabs):
+            try:
+                tabs.remove_pane(pane_id)
+            except Exception:
+                pass
+        self.open_tabs.clear()
+        self.query_one("#changes-log", RichLog).clear()
+        self.query_one(ChatLog).add_system(f"Switched workspace to {self.workspace}")
+        self.connect_agent()  # restart agent rooted at the new folder
+
+    # ------------------------------------------------------ file previews -- #
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        self.open_file_tab(Path(event.path))
+
+    def open_file_tab(self, path: Path) -> None:
+        tabs = self.query_one("#preview-tabs", TabbedContent)
+        pid = tab_id(path)
+        renderable = renderable_for_path(path)
+        if pid in self.open_tabs:
+            tabs.get_pane(pid).query_one(Static).update(renderable)
+        else:
+            body = VerticalScroll(Static(renderable, classes="preview-body"))
+            tabs.add_pane(TabPane(path.name, body, id=pid))
+            self.open_tabs[pid] = path
+        tabs.active = pid
+
+    def refresh_open_tabs(self) -> None:
+        tabs = self.query_one("#preview-tabs", TabbedContent)
+        for pid, path in list(self.open_tabs.items()):
+            if path.exists():
+                try:
+                    tabs.get_pane(pid).query_one(Static).update(renderable_for_path(path))
+                except Exception:
+                    pass
+
+    # --------------------------------------------------------------- chat -- #
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
         if not text:
             return
-        if text.startswith("/"):
-            await self.handle_command(text)
-        else:
-            self.send_message(text)
-
-    # ------------------------------------------------------------ commands -- #
-
-    async def handle_command(self, raw: str) -> None:
-        log = self.query_one(ChatLog)
-        parts = raw.split(maxsplit=1)
-        cmd, arg = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
-
-        if cmd == "/help":
-            log.write(Text.from_markup("\n" + HELP_TEXT))
-        elif cmd == "/files":
-            if not self.workspace.files:
-                log.add_system("No generated files yet.")
-            else:
-                for f in self.workspace.files.values():
-                    mark = "✔ on disk" if f.applied else "in memory"
-                    log.add_system(f"  {f.name}  ({f.language}, {len(f.content)} chars, {mark})")
-        elif cmd == "/apply":
-            self.cmd_apply(arg)
-        elif cmd == "/run":
-            self.cmd_run(arg)
-        elif cmd == "/preview":
-            self.cmd_preview(arg)
-        elif cmd == "/load":
-            self.cmd_load(arg)
-        elif cmd == "/clear":
-            self.history.clear()
-            log.add_system("Conversation history cleared (generated files kept).")
-        elif cmd == "/model":
-            if self.provider is None:
-                log.add_error("No provider available.")
-            elif arg:
-                self.provider.model = arg
-                self.sub_title = arg
-                log.add_system(f"Model switched to {arg}")
-            else:
-                log.add_system(f"Current model: {self.provider.model}")
-        else:
-            log.add_error(f"Unknown command: {cmd}  (try /help)")
-
-    def cmd_apply(self, arg: str) -> None:
-        log = self.query_one(ChatLog)
-        if not arg:
-            log.add_error("Usage: /apply <filename>  or  /apply all")
-            return
-        targets = (
-            list(self.workspace.files.values())
-            if arg == "all"
-            else [self.workspace.files[arg]] if arg in self.workspace.files else None
-        )
-        if not targets:
-            log.add_error(f"No generated file named '{arg}'. Try /files.")
-            return
-        for f in targets:
-            try:
-                path = Path(f.name)
-                if path.parent != Path("."):
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(f.content, encoding="utf-8")
-                f.applied = True
-                log.add_system(f"✔ wrote {path.resolve()}")
-            except OSError as exc:
-                log.add_error(f"Failed to write {f.name}: {exc}")
-        self.refresh_file_tree()
-
-    def cmd_run(self, arg: str) -> None:
-        log = self.query_one(ChatLog)
-        if not arg:
-            log.add_error("Usage: /run <filename>")
-            return
-        f = self.workspace.files.get(arg)
-        if f is None and not Path(arg).exists():
-            log.add_error(f"No file named '{arg}'.")
-            return
-        # Make sure it exists on disk, then run it.
-        if f is not None and not f.applied:
-            self.cmd_apply(arg)
-        self.run_script(arg)
-
-    def cmd_preview(self, arg: str) -> None:
-        log = self.query_one(ChatLog)
-        if arg not in self.workspace.files:
-            log.add_error(f"No generated file named '{arg}'. Try /files.")
-            return
-        tabs = self.query_one("#preview-tabs", TabbedContent)
-        tabs.active = slug(arg)
-
-    def cmd_load(self, arg: str) -> None:
-        log = self.query_one(ChatLog)
-        if not arg:
-            log.add_error("Usage: /load <path>")
-            return
-        path = Path(arg)
-        if not path.is_file():
-            log.add_error(f"File not found: {arg}")
-            return
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            log.add_error(f"Could not read {arg}: {exc}")
-            return
-        lang = EXT_FOR_LANG.get(path.suffix.lstrip("."), "text")
-        self.history.append(
-            {
-                "role": "user",
-                "content": f"Here is the current content of `{path.name}`:\n\n```{lang} {path.name}\n{content}\n```",
-            }
-        )
-        gf = self.workspace.files.setdefault(
-            path.name, GeneratedFile(path.name, lang, content, applied=True)
-        )
-        gf.content, gf.language = content, lang
-        self.update_preview_tab(path.name)
-        self.refresh_file_tree()
-        log.add_system(f"Loaded {path.name} into the conversation ({len(content)} chars).")
-
-    # ------------------------------------------------------------- preview -- #
-
-    def update_preview_tab(self, name: str) -> None:
-        f = self.workspace.files[name]
-        tabs = self.query_one("#preview-tabs", TabbedContent)
-        pane_id = slug(name)
-
-        if f.language in ("markdown", "md"):
-            renderable = RichMarkdown(f.content)
-        else:
-            renderable = Syntax(
-                f.content,
-                f.language or "text",
-                line_numbers=True,
-                word_wrap=True,
-                indent_guides=True,
-                theme="ansi_dark",
+        if not self.connected:
+            self.query_one(ChatLog).add_error(
+                "Not connected to Claude Code yet — see the message above."
             )
-
-        try:
-            pane = tabs.get_pane(pane_id)
-            pane.query_one(Static).update(renderable)
-        except Exception:
-            body = VerticalScroll(Static(renderable, classes="preview-code"))
-            tabs.add_pane(TabPane(name, body, id=pane_id))
-
-    def refresh_all_previews(self) -> None:
-        for name in self.workspace.files:
-            self.update_preview_tab(name)
-        self.refresh_file_tree()
-
-    def refresh_file_tree(self) -> None:
-        tree = self.query_one("#file-tree", Tree)
-        tree.clear()
-        tree.root.expand()
-        for f in self.workspace.files.values():
-            label = f"{'✔ ' if f.applied else ''}{f.name}  [dim]({f.language})[/dim]"
-            tree.root.add_leaf(label, data=f.name)
-
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        name = event.node.data
-        if name in self.workspace.files:
-            self.cmd_preview(name)
-
-    # ----------------------------------------------------------- streaming -- #
-
-    def send_message(self, text: str) -> None:
-        log = self.query_one(ChatLog)
-        if self.provider is None:
-            log.add_error("Chat disabled — set ANTHROPIC_API_KEY and restart.")
             return
-        log.add_user(text)
-        self.history.append({"role": "user", "content": text})
-        self.stream_response()
+        self.query_one(ChatLog).add_user(text)
+        self.run_turn(text)
 
-    @work(exclusive=True)
-    async def stream_response(self) -> None:
+    @work(exclusive=True, group="turn")
+    async def run_turn(self, prompt: str) -> None:
         log = self.query_one(ChatLog)
-        assert self.provider is not None
-        self.status("Claude is thinking…", busy=True)
-        accumulated = ""
-        chunk_count = 0
+        assert self.client is not None
+        self.status("Claude is working…", busy=True)
+        self._bash_calls.clear()
+        header_shown = False
+        edited: set[str] = set()
+        cost = None
         try:
-            async for chunk in self.provider.stream_chat(SYSTEM_PROMPT, self.history):
-                accumulated += chunk
-                chunk_count += 1
-                # Hot-reload the preview as code streams in (throttled).
-                if chunk_count % 8 == 0:
-                    self.apply_extracted(accumulated)
-                    self.status(f"Streaming… {len(accumulated)} chars", busy=True)
+            await self.client.query(prompt)
+            async for msg in self.client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            if block.text.strip():
+                                if not header_shown:
+                                    log.add_assistant_header()
+                                    header_shown = True
+                                log.add_assistant_markdown(block.text)
+                        elif isinstance(block, ThinkingBlock):
+                            log.add_activity("  …thinking", "dim italic")
+                        elif isinstance(block, ToolUseBlock):
+                            self.handle_tool_use(block, edited)
+                elif isinstance(msg, UserMessage):
+                    self.handle_tool_results(msg)
+                elif isinstance(msg, ResultMessage):
+                    cost = getattr(msg, "total_cost_usd", None)
+                elif isinstance(msg, SystemMessage):
+                    pass
         except Exception as exc:
+            log.add_error(f"Agent error: {exc}")
             self.status("Error")
-            log.add_error(f"API error: {exc}")
-            # Drop the failed user turn so history stays valid for a retry.
-            if self.history and self.history[-1]["role"] == "user":
-                self.history.pop()
             return
 
-        self.history.append({"role": "assistant", "content": accumulated})
-        log.add_assistant_markdown(accumulated)
-        touched = self.apply_extracted(accumulated)
-        if touched:
-            log.add_system(
-                f"Preview updated: {', '.join(touched)} — use /apply <file> to save."
-            )
-        self.status(f"Ready — {self.provider.model}")
+        # Reflect changes on disk in the preview.
+        if edited:
+            self.query_one(DirectoryTree).reload()
+            self.refresh_open_tabs()
+            log.add_activity(f"  ✓ touched {len(edited)} file(s)", "green")
+        ready = f"Ready — {self.workspace.name}"
+        if cost:
+            ready += f"  (${cost:.4f} this session)"
+        self.status(ready)
 
-    def apply_extracted(self, text: str) -> list[str]:
-        touched = self.workspace.update_from_text(text)
-        for name in touched:
-            self.update_preview_tab(name)
-        if touched:
-            self.refresh_file_tree()
-        return touched
-
-    # ---------------------------------------------------------------- run -- #
-
-    @work(exclusive=False, thread=True)
-    def run_script(self, name: str) -> None:
-        path = Path(name)
-        if path.suffix == ".py":
-            cmd = [sys.executable, str(path)]
-        elif path.suffix in (".sh",):
-            cmd = ["bash", str(path)]
+    def handle_tool_use(self, block: ToolUseBlock, edited: set[str]) -> None:
+        log = self.query_one(ChatLog)
+        name = block.name
+        inp = block.input or {}
+        if name == "Bash":
+            cmd = str(inp.get("command", ""))
+            self._bash_calls[block.id] = cmd
+            log.add_activity(f"  ▶ {cmd.splitlines()[0][:80] if cmd else 'bash'}", "blue")
+        elif name in EDIT_TOOLS:
+            fp = str(inp.get("file_path", inp.get("notebook_path", "?")))
+            edited.add(fp)
+            verb = "📝 Write" if name == "Write" else "✏️  Edit"
+            log.add_activity(f"  {verb} {self._rel(fp)}", "yellow")
+            self.record_change(name, inp)
+        elif name in ("Read", "Glob", "Grep"):
+            target = inp.get("file_path") or inp.get("pattern") or inp.get("path") or ""
+            log.add_activity(f"  👁 {name} {self._rel(str(target))}", "dim")
         else:
-            self.call_from_thread(
-                self.query_one(ChatLog).add_error,
-                f"Don't know how to run {name} (only .py and .sh).",
-            )
+            log.add_activity(f"  • {name}", "dim")
+
+    def handle_tool_results(self, msg: UserMessage) -> None:
+        content = msg.content
+        if not isinstance(content, list):
             return
-        self.call_from_thread(self.status, f"Running {name}…", True)
+        out = self.query_one("#output-log", RichLog)
+        for block in content:
+            if isinstance(block, ToolResultBlock) and block.tool_use_id in self._bash_calls:
+                cmd = self._bash_calls[block.tool_use_id]
+                out.write(Text(f"\n$ {cmd}", style="bold"))
+                out.write(Text(self._result_text(block.content)))
+
+    def record_change(self, name: str, inp: dict) -> None:
+        changes = self.query_one("#changes-log", RichLog)
+        fp = str(inp.get("file_path", inp.get("notebook_path", "?")))
+        if name == "Write":
+            changes.write(Text(f"\n📝 wrote {self._rel(fp)}", style="bold green"))
+        elif name == "Edit":
+            changes.write(diff_text(self._rel(fp), str(inp.get("old_string", "")),
+                                    str(inp.get("new_string", ""))))
+        elif name == "MultiEdit":
+            for e in inp.get("edits", []):
+                changes.write(diff_text(self._rel(fp), str(e.get("old_string", "")),
+                                        str(e.get("new_string", ""))))
+        else:
+            changes.write(Text(f"\n✏️  edited {self._rel(fp)}", style="bold yellow"))
+
+    # -------------------------------------------------------------- utils -- #
+
+    def _rel(self, p: str) -> str:
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60
-            )
-            out = proc.stdout or ""
-            err = proc.stderr or ""
-            code = proc.returncode
-        except subprocess.TimeoutExpired:
-            out, err, code = "", "Timed out after 60s", -1
-        except OSError as exc:
-            out, err, code = "", str(exc), -1
+            return str(Path(p).resolve().relative_to(self.workspace))
+        except (ValueError, OSError):
+            return p
 
-        def show() -> None:
-            output_log = self.query_one("#output-log", RichLog)
-            output_log.write(Text(f"\n$ {' '.join(cmd)}", style="bold"))
-            if out:
-                output_log.write(Text(out))
-            if err:
-                output_log.write(Text(err, style="red"))
-            output_log.write(Text(f"[exit {code}]", style="dim"))
-            self.query_one("#preview-tabs", TabbedContent).active = "tab-output"
-            self.status(f"{name} exited with code {code}")
+    @staticmethod
+    def _result_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", item)))
+                else:
+                    parts.append(getattr(item, "text", str(item)))
+            return "\n".join(parts)
+        return str(content)
 
-        self.call_from_thread(show)
-
-
-# --------------------------------------------------------------------------- #
-# Login bootstrap — browser OAuth via the `ant` CLI, saved profile thereafter
-# --------------------------------------------------------------------------- #
-
-def _anthropic_config_dirs() -> list[Path]:
-    override = os.environ.get("ANTHROPIC_CONFIG_DIR")
-    if override:
-        return [Path(override)]
-    dirs = []
-    if os.environ.get("APPDATA"):  # Windows
-        dirs.append(Path(os.environ["APPDATA"]) / "Anthropic")
-    dirs.append(Path.home() / ".config" / "anthropic")  # Linux/macOS
-    return dirs
-
-
-def has_credentials() -> bool:
-    """True if the SDK will find something: env key/token or a saved login profile."""
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return True
-    for cfg in _anthropic_config_dirs():
-        creds = cfg / "credentials"
-        if creds.is_dir() and any(creds.glob("*.json")):
-            return True
-    return False
-
-
-def ensure_login() -> None:
-    """First launch: open the Claude browser login and save the profile.
-
-    The saved profile is picked up automatically by the anthropic SDK on every
-    future launch, so this only happens once.
-    """
-    if has_credentials():
-        return
-    ant = shutil.which("ant")
-    if ant:
-        print("No Claude credentials found — opening the Claude login in your browser…")
-        print("(complete the login there; your session will be saved for next time)\n")
-        try:
-            result = subprocess.run([ant, "auth", "login"])
-            if result.returncode == 0 and has_credentials():
-                print("\n✔ Logged in. Starting claude-preview…")
-                return
-        except OSError as exc:
-            print(f"Could not run ant auth login: {exc}", file=sys.stderr)
-        print(
-            "\nLogin didn't complete — the app will start with chat disabled.\n"
-            "Run `ant auth login` manually, then restart.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "No Claude credentials found, and the `ant` CLI (which provides the\n"
-            "browser login) isn't installed. Two ways to log in:\n"
-            "  1. Install the Anthropic CLI from\n"
-            "       https://github.com/anthropics/anthropic-cli/releases\n"
-            "     then just relaunch — the login window opens automatically.\n"
-            "  2. Or set an API key:  set ANTHROPIC_API_KEY=sk-ant-...\n"
-            "\nStarting with chat disabled for now.",
-            file=sys.stderr,
-        )
+    async def on_unmount(self) -> None:
+        if self.client is not None:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
 
 
 def main() -> None:
-    ensure_login()
-    ClaudePreviewApp().run()
+    import sys
+
+    workspace = sys.argv[1] if len(sys.argv) > 1 else None
+    ClaudePreviewApp(workspace=workspace).run()
 
 
 if __name__ == "__main__":

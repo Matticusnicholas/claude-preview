@@ -1,6 +1,6 @@
 @echo off
-rem Launcher for claude-preview. Run from anywhere; add this folder to PATH if you like.
-rem First launch opens the Claude browser login (needs the `ant` CLI); after that
-rem the saved session is reused automatically.
+rem Launcher for claude-preview.
+rem Needs Claude Code installed and logged in (npm i -g @anthropic-ai/claude-code; claude; /login).
+rem Optional: pass a starting folder ->  claude-preview.bat C:\path\to\project
 
 python "%~dp0claude_preview.py" %*

@@ -1,13 +1,13 @@
 [project]
 name = "claude-preview"
 version = "0.1.0"
-description = "Interactive Claude coding session with a live split-screen preview pane in the terminal"
+description = "Cursor-style Claude coding agent in your terminal — works in a folder you pick, on your Claude Code login"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "textual>=1.0",
     "rich>=13.0",
-    "anthropic>=0.49",
+    "claude-agent-sdk>=0.2",
 ]
 
 [project.scripts]
