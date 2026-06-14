@@ -1,24 +1,24 @@
 @echo off
 rem ============================================================================
-rem  claude-preview WEB launcher: Cursor-style IDE in your browser.
-rem  First run installs deps + Claude Code and asks for your token once.
-rem  Pass a starting folder:  start-web.bat C:\path\to\project
+rem  claude-preview - the TERMINAL (TUI) version. Most people want start.bat
+rem  (the web IDE). Use this for a no-browser, split-screen terminal experience.
+rem  Optional starting folder:  start-terminal.bat C:\path\to\project
 rem ============================================================================
 setlocal
 cd /d "%~dp0"
-title claude-preview (web)
+title claude-preview (terminal)
 
 where python >nul 2>&1
 if errorlevel 1 (
-    echo [claude-preview] Python 3.10+ is required: https://www.python.org/downloads/  ^(check "Add to PATH"^)
+    echo [claude-preview] Python 3.10+ is required: https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
-python -c "import fastapi, uvicorn, claude_agent_sdk" >nul 2>&1
+python -c "import textual, rich, claude_agent_sdk" >nul 2>&1
 if errorlevel 1 (
     echo [claude-preview] Installing dependencies...
-    python -m pip install --disable-pip-version-check -r "%~dp0webapp\requirements.txt"
+    python -m pip install --disable-pip-version-check -r "%~dp0requirements.txt"
     if errorlevel 1 ( echo Dependency install failed. & pause & exit /b 1 )
 )
 
@@ -59,8 +59,5 @@ if "%CLAUDE_CODE_OAUTH_TOKEN%"=="" ( echo No token entered. & pause & exit /b 1 
 echo Token saved.
 
 :run
-echo.
-echo  Opening http://127.0.0.1:8765 ...
-start "" http://127.0.0.1:8765
-python "%~dp0webapp\server.py" %*
+python "%~dp0claude_preview.py" %*
 endlocal

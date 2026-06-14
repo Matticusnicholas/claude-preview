@@ -33,8 +33,8 @@ Built with [Textual](https://textual.textualize.io/) (reactive TUI), [Rich](http
 
 | | What it is |
 |---|---|
-| 🖥️ **Web IDE** (`start-web.bat`) | A **Cursor-style editor in your browser** — file tree, Monaco code editor with tabs, AI chat composer, inline diffs with **accept/reject**, and an integrated terminal. This is the main experience (and the base for the upcoming Electron app). |
-| ⌨️ **Terminal app** (`start.bat`) | The same agent in a split-screen **TUI** — chat + live preview, no browser. Great over SSH. |
+| 🖥️ **Web IDE** (`start.bat`) | A **Cursor-style editor in your browser** — file tree, Monaco code editor with tabs, AI chat composer, inline diffs with **accept/reject**, and an integrated terminal. This is the main experience (and the base for the upcoming Electron app). |
+| ⌨️ **Terminal app** (`start-terminal.bat`) | The same agent in a split-screen **TUI** — chat + live preview, no browser. Great over SSH. |
 
 Both run the same engine: the Claude Agent SDK on your local Claude Code login.
 
@@ -42,8 +42,8 @@ Both run the same engine: the Claude Agent SDK on your local Claude Code login.
 
 Clone the repo, then:
 
-- **Web IDE — Windows:** double-click **`start-web.bat`** (opens `http://127.0.0.1:8765`)
-- **Terminal app — Windows:** double-click **`start.bat`**
+- **Web IDE — Windows:** double-click **`start.bat`** (opens `http://127.0.0.1:8765`)
+- **Terminal app — Windows:** double-click **`start-terminal.bat`**
 - **macOS / Linux (terminal app):** `./start.sh`  ·  **(web)** `python webapp/server.py`
 
 The launcher installs everything it needs (Python deps, and Claude Code if you
